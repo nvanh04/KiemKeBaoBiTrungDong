@@ -1071,15 +1071,14 @@ async function pullCloudDraft() {
             lucide.createIcons();
 
             await loadFromSheets(true);
-pullCloudDraft();
-setInterval(() => loadFromSheets(false), 30000);
-setInterval(syncDraftToCloud, 20000); // thử gửi lại bản nháp nếu trước đó mất mạng
-document.addEventListener('visibilitychange', () => {
-    if (document.hidden) flushDraftOnExit();
-    else { loadFromSheets(false); syncDraftToCloud(); }
-});
-window.addEventListener('pagehide', flushDraftOnExit);
-window.addEventListener('online', () => { flushPendingSheets(); loadFromSheets(false); syncDraftToCloud(); });
+            pullCloudDraft();
+            setInterval(() => loadFromSheets(false), 30000);
+            setInterval(syncDraftToCloud, 20000); // thử gửi lại bản nháp nếu trước đó mất mạng
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) flushDraftOnExit();
+                else { loadFromSheets(false); syncDraftToCloud(); }});
+            window.addEventListener('pagehide', flushDraftOnExit);
+            window.addEventListener('online', () => { flushPendingSheets(); loadFromSheets(false); syncDraftToCloud(); });
 
         function initOrUnlockAudio() {
             try {
