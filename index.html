@@ -1079,7 +1079,7 @@ async function pullCloudDraft() {
                 else { loadFromSheets(false); syncDraftToCloud(); }});
             window.addEventListener('pagehide', flushDraftOnExit);
             window.addEventListener('online', () => { flushPendingSheets(); loadFromSheets(false); syncDraftToCloud(); });
-
+            });
         function initOrUnlockAudio() {
             try {
                 if (!audioCtx) {
