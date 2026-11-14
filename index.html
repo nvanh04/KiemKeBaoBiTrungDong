@@ -207,6 +207,7 @@
                     <div class="flex items-center space-x-1.5 truncate">
                         <i data-lucide="list-checks" class="w-4 h-4 text-blue-600 shrink-0"></i>
                         <h3 class="font-bold text-xs uppercase text-slate-700 truncate">Vật Tư Trong Phiếu</h3>
+                        <span id="draft-sync-label" class="text-[10px] font-semibold normal-case shrink-0 ml-1"></span>
                     </div>
                     <span id="current-items-count" class="text-[11px] font-bold bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full shrink-0">0 mục</span>
                 </div>
@@ -883,46 +884,152 @@
         // ====================================================================
         // LƯU TẠM PHIẾU ĐANG NHẬP (không mất khi tải lại trang / tắt trình duyệt)
         // ====================================================================
-        function saveDraft() {
-            try {
-                const nameEl = document.getElementById('user-name');
-                const dateEl = document.getElementById('user-date');
-                const draft = {
-                    workshop: getSelectedUserWorkshop(),
-                    userName: nameEl ? nameEl.value : '',
-                    date: dateEl ? dateEl.value : '',
-                    items: currentSheetItems,
-                    ts: Date.now()
-                };
-                localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
-            } catch (e) {}
+        const DRAFT_DIRTY_KEY = 'app_draft_dirty';   // '1' = có thay đổi chưa gửi lên Sheets
+const DRAFT_CLOUD_KEY = 'app_draft_cloud';   // '1' = trên Sheets đang có bản nháp của máy này
+let draftTimer = null, draftSyncing = false, draftEdited = false;
+
+function readLocalDraft() {
+    try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null'); } catch (e) { return null; }
+}
+
+function isDraftEmpty(d) {
+    return !d || ((!Array.isArray(d.items) || d.items.length === 0) && !(d.userName || '').trim());
+}
+
+function persistDraftLocal(ts) {
+    const nameEl = document.getElementById('user-name');
+    const dateEl = document.getElementById('user-date');
+    const draft = {
+        workshop: getSelectedUserWorkshop(),
+        userName: nameEl ? nameEl.value : '',
+        date: dateEl ? dateEl.value : '',
+        items: currentSheetItems,
+        ts: ts || Date.now()
+    };
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch (e) {}
+    return draft;
+}
+
+function setDraftLabel(state) {
+    const el = document.getElementById('draft-sync-label');
+    if (!el) return;
+    const map = {
+        saving:  ['Đang lưu nháp...', 'text-slate-500'],
+        saved:   ['✓ Đã lưu nháp', 'text-emerald-600'],
+        offline: ['⚠ Chưa đồng bộ (đã lưu trên máy)', 'text-amber-600'],
+        none:    ['', '']
+    };
+    const [txt, cls] = map[state] || map.none;
+    el.innerText = txt;
+    el.className = 'text-[10px] font-semibold normal-case shrink-0 ml-1 ' + cls;
+}
+
+// Gọi mỗi khi người dùng thay đổi phiếu: lưu máy ngay, gửi Sheets sau 1.5 giây
+function saveDraft() {
+    draftEdited = true;
+    const d = persistDraftLocal();
+    if (isDraftEmpty(d) && localStorage.getItem(DRAFT_CLOUD_KEY) !== '1') { setDraftLabel('none'); return; }
+    scheduleDraftSync(1500);
+}
+
+// Gọi sau khi lưu phiếu chính thức: xóa nháp ở máy và trên Sheets
+function clearDraft() {
+    try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+    scheduleDraftSync(200);
+}
+
+function scheduleDraftSync(delay) {
+    try { localStorage.setItem(DRAFT_DIRTY_KEY, '1'); } catch (e) {}
+    setDraftLabel('saving');
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(syncDraftToCloud, delay);
+}
+
+function cloudDraftPayload(d) {
+    return { deviceId: currentDeviceId, workshop: d.workshop, userName: d.userName, date: d.date, items: d.items, updatedAt: d.ts };
+}
+
+async function syncDraftToCloud() {
+    if (draftSyncing || localStorage.getItem(DRAFT_DIRTY_KEY) !== '1') return;
+    const d = readLocalDraft();
+    const empty = isDraftEmpty(d);
+    if (!navigator.onLine) { setDraftLabel(empty ? 'none' : 'offline'); return; }
+
+    draftSyncing = true;
+    try {
+        if (empty) await gas('deleteDraft', { deviceId: currentDeviceId });
+        else await gas('saveDraft', { draft: cloudDraftPayload(d) });
+
+        if (empty) localStorage.removeItem(DRAFT_CLOUD_KEY); else localStorage.setItem(DRAFT_CLOUD_KEY, '1');
+
+        const now = readLocalDraft();
+        if ((now ? now.ts : 0) === (d ? d.ts : 0)) {
+            localStorage.removeItem(DRAFT_DIRTY_KEY);
+            setDraftLabel(empty ? 'none' : 'saved');
+        } else {
+            scheduleDraftSync(300); // người dùng vừa sửa tiếp trong lúc đang gửi
         }
+    } catch (e) {
+        setDraftLabel(empty ? 'none' : 'offline'); // vẫn còn ở máy, sẽ tự gửi lại
+    } finally {
+        draftSyncing = false;
+    }
+}
 
-        function clearDraft() {
-            try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+// Thoát / chuyển app / tắt tab: gửi nốt bản nháp nếu còn thay đổi chưa gửi
+function flushDraftOnExit() {
+    try {
+        if (localStorage.getItem(DRAFT_DIRTY_KEY) !== '1') return;
+        const d = readLocalDraft();
+        const body = JSON.stringify(isDraftEmpty(d)
+            ? { action: 'deleteDraft', deviceId: currentDeviceId }
+            : { action: 'saveDraft', draft: cloudDraftPayload(d) });
+        fetch(GAS_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body, keepalive: true }).catch(() => {});
+    } catch (e) {}
+}
+
+function applyDraft(d, fromCloud) {
+    const hasItems = Array.isArray(d.items) && d.items.length > 0;
+    if (!hasItems && !d.userName) return;
+
+    const ws = document.getElementById('user-workshop-select');
+    if (ws && d.workshop && workshops.some(w => w.name === d.workshop)) ws.value = d.workshop;
+    if (d.userName) document.getElementById('user-name').value = d.userName;
+    if (hasItems && d.date) document.getElementById('user-date').value = d.date;
+
+    currentSheetItems = hasItems ? d.items : [];
+    updateWorkshopScopedUI();
+    renderCurrentSheetItems();
+    if (fromCloud) persistDraftLocal(d.ts);
+
+    const dirty = localStorage.getItem(DRAFT_DIRTY_KEY) === '1';
+    setDraftLabel(dirty ? (navigator.onLine ? 'saving' : 'offline') : 'saved');
+    if (hasItems) showToast(`Đã khôi phục phiếu đang nhập dở (${d.items.length} mục)` + (fromCloud ? ' từ Google Sheets' : ''));
+}
+
+function restoreDraft() {
+    const d = readLocalDraft();
+    if (d) applyDraft(d, false);
+}
+
+// Mở lại web: đồng bộ giữa bản trên máy và bản trên Google Sheets
+async function pullCloudDraft() {
+    try {
+        if (localStorage.getItem(DRAFT_DIRTY_KEY) === '1') { await syncDraftToCloud(); return; }
+
+        const r = await gas('loadDraft', { deviceId: currentDeviceId });
+        const cloud = r.draft && !isDraftEmpty(r.draft) ? r.draft : null;
+        const local = readLocalDraft();
+        const localTs = local ? (local.ts || 0) : 0;
+        if (cloud) localStorage.setItem(DRAFT_CLOUD_KEY, '1');
+
+        if (cloud && cloud.updatedAt > localTs && !draftEdited) {
+            applyDraft({ ...cloud, ts: cloud.updatedAt }, true);   // bản trên Sheets mới hơn
+        } else if (!isDraftEmpty(local) && (!cloud || cloud.updatedAt < localTs)) {
+            scheduleDraftSync(500);                                 // bản trên máy mới hơn
         }
-
-        function restoreDraft() {
-            try {
-                const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
-                if (!d) return;
-                const hasItems = Array.isArray(d.items) && d.items.length > 0;
-                if (!hasItems && !d.userName) return;
-
-                const ws = document.getElementById('user-workshop-select');
-                if (ws && d.workshop && workshops.some(w => w.name === d.workshop)) ws.value = d.workshop;
-                if (d.userName) document.getElementById('user-name').value = d.userName;
-                if (hasItems && d.date) document.getElementById('user-date').value = d.date;
-
-                currentSheetItems = hasItems ? d.items : [];
-                updateWorkshopScopedUI();
-                renderCurrentSheetItems();
-                if (hasItems) showToast(`Đã khôi phục phiếu đang nhập dở (${d.items.length} mục)`);
-            } catch (e) {}
-        }
-
-        window.addEventListener('pagehide', saveDraft);
-        document.addEventListener('visibilitychange', () => { if (document.hidden) saveDraft(); });
+    } catch (e) {}
+}
 
         // ====================================================================
         // HÀNG ĐỢI PHIẾU CHƯA GỬI ĐƯỢC (mất mạng)
@@ -964,10 +1071,15 @@
             lucide.createIcons();
 
             await loadFromSheets(true);
-            setInterval(() => loadFromSheets(false), 30000);
-            document.addEventListener('visibilitychange', () => { if (!document.hidden) loadFromSheets(false); });
-            window.addEventListener('online', () => { flushPendingSheets(); loadFromSheets(false); });
-        });
+pullCloudDraft();
+setInterval(() => loadFromSheets(false), 30000);
+setInterval(syncDraftToCloud, 20000); // thử gửi lại bản nháp nếu trước đó mất mạng
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) flushDraftOnExit();
+    else { loadFromSheets(false); syncDraftToCloud(); }
+});
+window.addEventListener('pagehide', flushDraftOnExit);
+window.addEventListener('online', () => { flushPendingSheets(); loadFromSheets(false); syncDraftToCloud(); });
 
         function initOrUnlockAudio() {
             try {
